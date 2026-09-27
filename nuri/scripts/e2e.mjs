@@ -96,9 +96,124 @@ check("取り消しできる", afterUndo === 0);
 await page.keyboard.press("Meta+Shift+z");
 await page.screenshot({ path: join(out, "1-draw.png") });
 
+// 1b. フォルダ: 作成 → ドラッグで中へ → フォルダ非表示で中身が消える → 取り消し
+await page.getByRole("button", { name: "レイヤー", exact: true }).click();
+await page.locator('.layer-actions button[title="新規フォルダ"]').click();
+check("フォルダを作れる", await page.evaluate(() => window.nuri.editor.doc.root.children.some((n) => n.kind === "group")));
+await page.locator(".layer", { hasText: "レイヤー 1" }).dragTo(page.locator(".layer.folder"), { targetPosition: { x: 120, y: 24 } });
+const inFolder = await page.evaluate(() => {
+  const d = window.nuri.editor.doc;
+  const folder = d.root.children.find((n) => n.kind === "group");
+  return folder.children.map((n) => n.name);
+});
+check("ドラッグでフォルダに入れられる", inFolder.includes("レイヤー 1"), JSON.stringify(inFolder));
+const pixelAt = () =>
+  page.evaluate(() => {
+    const { editor } = window.nuri;
+    const l = editor.doc.layers.find((x) => x.name === "レイヤー 1");
+    const d = l.ctx.getImageData(0, 0, l.canvas.width, l.canvas.height).data;
+    let i = 3;
+    while (i < d.length && d[i] < 255) i += 4; // 完全に不透明な (縁でない) ピクセル
+    const x = ((i - 3) / 4) % l.canvas.width, y = Math.floor((i - 3) / 4 / l.canvas.width);
+    return Array.from(editor.compositeImage().getContext("2d").getImageData(x, y, 1, 1).data);
+  });
+const shown = await pixelAt();
+await page.locator(".layer.folder .eye").click();
+await page.waitForTimeout(100);
+const hiddenPx = await pixelAt();
+check("フォルダを非表示にすると中身も消える", shown[0] < 100 && hiddenPx[0] === 255, `${shown} → ${hiddenPx}`);
+await page.keyboard.press("Meta+z");
+await page.keyboard.press("Meta+z");
+const undone = await page.evaluate(() => window.nuri.editor.doc.root.children.map((n) => n.name));
+check("フォルダ操作を取り消せる", undone.includes("レイヤー 1"), JSON.stringify(undone));
+await page.keyboard.press("Meta+Shift+z");
+await page.keyboard.press("Meta+Shift+z");
+
+// 1c. 入り抜き: 入り抜きペンで横線 → 端が細く中央が太い
+await page.evaluate(() => {
+  const { editor } = window.nuri;
+  editor.brushIndex = editor.brushes.findIndex((b) => b.id === "inking");
+  // 表示倍率に関係なく確かめられるよう、入り抜きを長めにする
+  Object.assign(editor.brushes[editor.brushIndex], { size: 20, stabilizer: 0, taperIn: 200, taperOut: 200 });
+  const d = editor.doc;
+  const l = d.newLayer("taper");
+  d.insert(l, d.root.children.length, d.root);
+  editor.setTool("brush");
+});
+const y0 = cy + 200;
+await page.mouse.move(cx - 250, y0);
+await page.mouse.down();
+for (let i = 1; i <= 50; i++) await page.mouse.move(cx - 250 + i * 10, y0);
+await page.mouse.up();
+const widths = await page.evaluate(() => {
+  const l = window.nuri.editor.doc.layers.find((x) => x.name === "taper");
+  const { width: W, height: H } = l.canvas;
+  const d = l.ctx.getImageData(0, 0, W, H).data;
+  let x1 = W, x2 = 0;
+  for (let i = 3; i < d.length; i += 4) if (d[i] > 128) { const x = ((i - 3) / 4) % W; x1 = Math.min(x1, x); x2 = Math.max(x2, x); }
+  const colWidth = (x) => { let n = 0; for (let y = 0; y < H; y++) if (d[(y * W + x) * 4 + 3] > 128) n++; return n; };
+  const span = x2 - x1;
+  return { start: colWidth(Math.round(x1 + span * 0.03)), mid: colWidth(Math.round(x1 + span * 0.5)), end: colWidth(Math.round(x2 - span * 0.03)) };
+});
+check("入り抜きで両端が細くなる", widths.start < widths.mid * 0.6 && widths.end < widths.mid * 0.6, JSON.stringify(widths));
+
+// 1d. 大きなキャンバスでの描画速度 (A4 350dpi・レイヤー 12 枚)。部分更新と全体合成の時間を比べる
+const savedDoc = await page.evaluate(() => {
+  const { editor, createDocument } = window.nuri;
+  window.__saved = editor.doc;
+  const d = createDocument(2894, 4093, "perf");
+  for (let i = 0; i < 12; i++) {
+    const l = d.newLayer(`L${i}`);
+    l.ctx.fillStyle = `hsla(${i * 30}, 70%, 50%, 0.4)`;
+    l.ctx.fillRect(100 + i * 50, 100 + i * 80, 1800, 2500);
+    l.blend = i % 3 === 0 ? "multiply" : "normal";
+    d.root.children.push(l);
+  }
+  d.activeId = d.layers[6].id;
+  editor.setDocument(d);
+  editor.brushIndex = 0;
+  editor.brushes[0].stabilizer = 0;
+  editor.setTool("brush");
+  const times = (window.__frames = []);
+  const orig = editor.render.bind(editor);
+  editor.render = () => {
+    const t = performance.now();
+    orig();
+    times.push(performance.now() - t);
+  };
+  return true;
+});
+void savedDoc;
+await page.waitForTimeout(400);
+await page.evaluate(() => (window.__frames.length = 0));
+await page.mouse.move(cx - 100, cy);
+await page.mouse.down();
+for (let i = 1; i <= 40; i++) {
+  await page.mouse.move(cx - 100 + i * 5, cy + Math.sin(i / 5) * 40);
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+}
+await page.mouse.up();
+const perfResult = await page.evaluate(() => {
+  const { editor } = window.nuri;
+  const frames = window.__frames.slice(2);
+  const avg = frames.reduce((a, v) => a + v, 0) / Math.max(1, frames.length);
+  const c = document.createElement("canvas");
+  c.width = editor.doc.width;
+  c.height = editor.doc.height;
+  const g = c.getContext("2d");
+  const t = performance.now();
+  for (let i = 0; i < 3; i++) editor.doc.composite(g);
+  const full = (performance.now() - t) / 3;
+  g.getImageData(0, 0, 1, 1);
+  editor.setDocument(window.__saved);
+  return { frames: frames.length, avg: avg.toFixed(1), full: full.toFixed(1) };
+});
+check("A4・12 レイヤーで描画中の 1 フレームが全体合成より速い", Number(perfResult.avg) < Number(perfResult.full), `描画中 ${perfResult.avg}ms / 全体合成 ${perfResult.full}ms (${perfResult.frames} フレーム)`);
+
 // 2. 塗りつぶし・レイヤー追加
+const before = (await state()).layers.length;
 await page.keyboard.press("Meta+Shift+n");
-check("レイヤー追加", (await state()).layers.length === 3);
+check("レイヤー追加", (await state()).layers.length === before + 1);
 
 // 3. AI 背景生成 (モック)
 await page.evaluate(() => (window.nuri.settings.geminiKey = "TEST"));
@@ -188,6 +303,8 @@ if (fixtures && existsSync(join(fixtures, "clip_to_psd/tests/test_export_all_fea
   await load("clip_to_psd/tests/test_export_all_features.clip", "sample.clip");
   const s6 = await state();
   check(".clip を開ける", s6.w === 928 && s6.layers.length > 50, `${s6.w}x${s6.h} ${s6.layers.length} layers`);
+  const folders = await page.evaluate(() => window.nuri.editor.doc.nodes().filter((n) => n.kind === "group").map((n) => `${n.name}:${n.blend}`));
+  check(".clip のフォルダ構成を保つ", folders.length > 3 && folders.some((f) => f.endsWith("pass-through")), folders.slice(0, 5).join(", "));
   await page.waitForTimeout(500);
   await page.getByRole("button", { name: "レイヤー", exact: true }).click();
   await page.screenshot({ path: join(out, "4-clip.png") });
@@ -220,12 +337,14 @@ if (fixtures && existsSync(join(fixtures, "clip_to_psd/tests/test_export_all_fea
 // 7. PSD 保存 → 読み込み
 const psd = await page.evaluate(() => {
   const { editor, psd } = window.nuri;
-  const before = editor.doc.layers.map((l) => [l.name, l.blend, Math.round(l.opacity * 100), l.visible, l.clip]);
+  const tree = (g) => g.children.map((n) => (n.kind === "group" ? { f: n.name, b: n.blend, o: Math.round(n.opacity * 100), v: n.visible, c: tree(n) } : [n.name, n.blend, Math.round(n.opacity * 100), n.visible, n.clip]));
+  const before = JSON.stringify(tree(editor.doc.root));
   const doc = psd.readPsdFile(psd.writePsdFile(editor.doc), "roundtrip.psd");
-  const after = doc.layers.map((l) => [l.name, l.blend, Math.round(l.opacity * 100), l.visible, l.clip]);
-  return { same: JSON.stringify(before) === JSON.stringify(after), n: after.length };
+  const after = JSON.stringify(tree(doc.root));
+  if (before !== after) console.log(before.slice(0, 400), "\n", after.slice(0, 400));
+  return { same: before === after, n: doc.layers.length, folders: doc.nodes().filter((n) => n.kind === "group").length };
 });
-check("PSD で保存して開き直してもレイヤー情報が保たれる", psd.same, `(${psd.n} layers)`);
+check("PSD で保存して開き直してもフォルダ構成・レイヤー情報が保たれる", psd.same, `(${psd.n} layers, ${psd.folders} folders)`);
 
 check("コンソールエラーなし", errors.length === 0, errors.slice(0, 3).join("\n"));
 await browser.close();

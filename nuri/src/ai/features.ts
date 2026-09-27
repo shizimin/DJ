@@ -172,8 +172,8 @@ export class AiJobs {
       layer.ctx.imageSmoothingQuality = "high";
       layer.ctx.drawImage(result, r.x, r.y, r.w, r.h);
       // 用紙レイヤーの直上 (キャラクターより下) に置く
-      const paper = d.layers.findIndex((l) => l.paper);
-      this.editor.history.run(addLayerCommand(d, layer, paper + 1));
+      const paper = d.root.children.findIndex((l) => l.kind === "layer" && l.paper);
+      this.editor.history.run(addLayerCommand(d, layer, paper + 1, d.root));
     });
   }
 
@@ -216,8 +216,9 @@ export class AiJobs {
     fg.putImageData(img, 0, 0);
     const layer = d.newLayer(name);
     layer.ctx.drawImage(fitted, bounds.x, bounds.y);
-    const at = d.layers.includes(source) ? d.indexOf(source) + 1 : undefined;
-    this.editor.history.run(addLayerCommand(d, layer, at));
+    // 写真レイヤーのすぐ上 (同じフォルダ内) に置く
+    const parent = d.parentOf(source);
+    this.editor.history.run(parent ? addLayerCommand(d, layer, parent.children.indexOf(source) + 1, parent) : addLayerCommand(d, layer));
   }
 
   // ------------------------------------------------------------ 選択範囲の描き直し
@@ -272,7 +273,7 @@ export class AiJobs {
         layer.ctx.drawImage(selSnapshot, 0, 0);
         layer.ctx.globalCompositeOperation = "source-over";
       }
-      this.editor.history.run(addLayerCommand(d, layer, d.layers.length));
+      this.editor.history.run(addLayerCommand(d, layer, d.root.children.length, d.root));
     });
   }
 }

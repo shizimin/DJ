@@ -1,7 +1,7 @@
 // エディター本体: 表示 (ズーム・回転・パン)、ペン入力、各ツール、選択範囲。
 
-import { applyStroke, defaultBrushes, eraserBrushes, Stabilizer, Stroke, type Brush } from "./brush";
-import { createCanvas, createDocument, ctx2d, type Doc, type Layer } from "./doc";
+import { applyStroke, defaultBrushes, eraserBrushes, Stabilizer, Stroke, type Brush, type Rect, type StrokePoint } from "./brush";
+import { createCanvas, createDocument, ctx2d, type Doc, type Layer, type Node } from "./doc";
 import { History, PixelSnapshot } from "./history";
 import { dilateMask, floodFillMask } from "../image/pixels";
 
@@ -53,6 +53,8 @@ export class Editor {
   color = "#1d1d1f";
   recentColors: string[] = [];
   fill = { tolerance: 24, allLayers: true, gap: 1 };
+  /** 筆圧カーブ (1 = そのまま、大きいほど強く押さないと太くならない) */
+  pressureCurve = 1;
   view: View = { zoom: 1, x: 0, y: 0, rot: 0 };
 
   readonly canvas: HTMLCanvasElement;
@@ -80,6 +82,8 @@ export class Editor {
     view?: View;
     stroke?: Stroke;
     stab?: Stabilizer;
+    /** 手ブレ補正前の最後の入力点 (ペンを離したときに線を追いつかせる) */
+    raw?: StrokePoint;
     snap?: PixelSnapshot;
     layer?: Layer;
     erase?: boolean;
@@ -319,47 +323,72 @@ export class Editor {
     if (this.compositeDirty) {
       const g = ctx2d(this.composite);
       g.clearRect(0, 0, this.composite.width, this.composite.height);
-      this.doc.compositeRange(g, 0, this.doc.layers.length);
+      this.doc.composite(g);
       this.compositeDirty = false;
     }
     return this.composite;
   }
 
-  /** 描画中: 下のレイヤーのキャッシュ + 編集中レイヤー + 上のレイヤー */
+  /** 描画中のレイヤーを含む root 直下のノードの、クリッピング土台の位置 */
+  private liveBase = 0;
+
+  /**
+   * 描画中: 下側のキャッシュ + 編集中レイヤー + 上側を合成する。
+   * ストローク中は前回から描いた範囲だけを描き直す (大きなキャンバスでも軽くするため)。
+   */
   private livePreview(): HTMLCanvasElement {
     const d = this.drag!;
     const layer = d.layer!;
-    const pg = ctx2d(this.preview);
-    pg.globalAlpha = 1;
-    pg.globalCompositeOperation = "source-over";
-    pg.clearRect(0, 0, this.preview.width, this.preview.height);
+    let rect: Rect | null = null;
     if (d.kind === "stroke") {
-      pg.drawImage(layer.canvas, 0, 0);
+      const r = d.stroke!.takeDirty();
+      if (!r) return this.composite;
+      const x = Math.max(0, Math.floor(r.x));
+      const y = Math.max(0, Math.floor(r.y));
+      rect = { x, y, w: Math.min(this.doc.width, Math.ceil(r.x + r.w)) - x, h: Math.min(this.doc.height, Math.ceil(r.y + r.h)) - y };
+      if (rect.w <= 0 || rect.h <= 0) return this.composite;
+    }
+    const clip = (g: CanvasRenderingContext2D) => {
+      g.save();
+      if (rect) {
+        g.beginPath();
+        g.rect(rect.x, rect.y, rect.w, rect.h);
+        g.clip();
+        g.clearRect(rect.x, rect.y, rect.w, rect.h);
+      } else g.clearRect(0, 0, this.doc.width, this.doc.height);
+    };
+    const pg = ctx2d(this.preview);
+    clip(pg);
+    pg.drawImage(layer.canvas, 0, 0);
+    if (d.kind === "stroke") {
       applyStroke(pg, this.strokeBuf, {
         opacity: this.brush.opacity,
         erase: !!d.erase,
         lockAlpha: layer.lockAlpha,
         selection: this.doc.selection,
         scratch: this.scratch,
+        rect,
       });
-    } else {
-      pg.drawImage(layer.canvas, 0, 0);
     }
-    const out = this.composite;
-    const g = ctx2d(out);
-    g.clearRect(0, 0, out.width, out.height);
+    pg.restore();
+    const g = ctx2d(this.composite);
+    clip(g);
     g.drawImage(this.below, 0, 0);
-    const base = this.doc.clipBaseIndex(this.doc.indexOf(layer));
-    this.doc.compositeRange(g, base, this.doc.layers.length, { layer, image: this.preview });
-    this.compositeDirty = true;
-    return out;
+    g.restore();
+    this.doc.compositeRoot(g, this.liveBase, this.doc.root.children.length, { override: { layer, image: this.preview }, rect });
+    if (d.kind === "move") this.compositeDirty = true;
+    return this.composite;
   }
 
   private prepareBelow(layer: Layer) {
+    // layer を含む root 直下のノードを探し、それより下を合成してキャッシュする
+    let top: Node = layer;
+    for (let p = this.doc.parentOf(top); p && p !== this.doc.root; p = this.doc.parentOf(p)) top = p;
+    const list = this.doc.root.children;
+    this.liveBase = this.doc.clipBase(list, list.indexOf(top));
     const g = ctx2d(this.below);
     g.clearRect(0, 0, this.below.width, this.below.height);
-    const base = this.doc.clipBaseIndex(this.doc.indexOf(layer));
-    this.doc.compositeRange(g, 0, base);
+    this.doc.compositeRoot(g, 0, this.liveBase);
   }
 
   // ------------------------------------------------------------ 入力
@@ -488,12 +517,19 @@ export class Editor {
 
   private editableLayer(): Layer | null {
     const layer = this.doc.active;
-    if (!layer) return null;
-    if (layer.locked) {
+    if (!layer) {
+      if (this.doc.activeNode?.kind === "group") toast("フォルダには直接描けません。中のレイヤーを選んでください");
+      return null;
+    }
+    const lockedFolder = (() => {
+      for (let p = this.doc.parentOf(layer); p && p !== this.doc.root; p = this.doc.parentOf(p)) if (p.locked) return true;
+      return false;
+    })();
+    if (layer.locked || lockedFolder) {
       toast("レイヤーがロックされています");
       return null;
     }
-    if (!layer.visible) {
+    if (!this.doc.isVisible(layer)) {
       toast("非表示のレイヤーには描けません");
       return null;
     }
@@ -502,7 +538,7 @@ export class Editor {
 
   private pressureOf(e: PointerEvent) {
     if (e.pointerType === "mouse") return 1;
-    return e.pressure > 0 ? Math.pow(e.pressure, 1.2) : 0.5;
+    return e.pressure > 0 ? Math.pow(e.pressure, this.pressureCurve) : 0.5;
   }
 
   private beginStroke(e: PointerEvent, d: { x: number; y: number }, base: { start: { x: number; y: number }; sx: number; sy: number; pointerId: number }) {
@@ -511,9 +547,10 @@ export class Editor {
     const erase = this.tool === "eraser";
     const stroke = new Stroke(this.brush, erase ? "#000" : this.color, this.strokeBuf);
     const stab = new Stabilizer(this.brush.stabilizer);
+    this.compositeImage(); // 部分更新の土台になる合成結果を最新にしておく
     this.prepareBelow(layer);
-    this.drag = { ...base, kind: "stroke", layer, stroke, stab, erase, snap: new PixelSnapshot(this.doc, layer) };
     const pr = this.pressureOf(e);
+    this.drag = { ...base, kind: "stroke", layer, stroke, stab, erase, snap: new PixelSnapshot(this.doc, layer), raw: { ...d, pressure: pr } };
     if (e.shiftKey && this.lastStrokeEnd) {
       // Shift+クリックで直線
       stroke.add({ ...this.lastStrokeEnd, pressure: pr });
@@ -557,7 +594,8 @@ export class Editor {
         for (const ev of events.length ? events : [e]) {
           const q = this.local(ev);
           const dd = this.toDoc(q.x, q.y);
-          drag.stroke!.add(drag.stab!.push({ ...dd, pressure: this.pressureOf(ev) }));
+          drag.raw = { ...dd, pressure: this.pressureOf(ev) };
+          drag.stroke!.add(drag.stab!.push(drag.raw));
         }
         break;
       }
@@ -591,7 +629,11 @@ export class Editor {
           this.invalidate();
           break;
         }
+        // 手ブレ補正で遅れている分を、ペンを離した位置まで追いつかせる
+        if (drag.raw && this.brush.stabilizer > 0) drag.stroke!.add(drag.raw);
+        drag.stroke!.finish();
         this.commitStroke(drag.layer!, drag.stroke!, drag.snap!, !!drag.erase);
+        this.lastStrokeEnd = drag.raw ? { x: drag.raw.x, y: drag.raw.y } : this.cursor;
         break;
       case "rect": {
         const [a, b] = drag.points!;
@@ -641,7 +683,6 @@ export class Editor {
       const cmd = snap.commit(erase ? "消しゴム" : "ブラシ", dirty);
       if (cmd) this.history.push(cmd);
     }
-    this.lastStrokeEnd = this.cursor;
     this.doc.emit("pixels");
   }
 
@@ -670,7 +711,7 @@ export class Editor {
 
   private refPixels(): ImageData {
     const { width: w, height: h } = this.doc;
-    const src = this.fill.allLayers ? this.compositeImage() : this.doc.active!.canvas;
+    const src = this.fill.allLayers || !this.doc.active ? this.compositeImage() : this.doc.active.canvas;
     return ctx2d(src).getImageData(0, 0, w, h);
   }
 

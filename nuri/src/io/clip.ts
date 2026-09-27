@@ -9,6 +9,7 @@ import { decodeOffscreen, Reader } from "./csp-blocks";
 import { blob, getSql, num, rows, str, tableExists, type Row } from "./sqlite";
 
 export interface ClipLayer {
+  kind: "layer";
   name: string;
   /** フォルダ階層 ("フォルダ1/フォルダ2/") */
   path: string;
@@ -25,6 +26,20 @@ export interface ClipLayer {
   load(): ClipBitmap | null;
 }
 
+export interface ClipFolder {
+  kind: "folder";
+  name: string;
+  visible: boolean;
+  opacity: number;
+  /** "pass-through" = 通過 */
+  blend: BlendMode | "pass-through";
+  clip: boolean;
+  open: boolean;
+  children: ClipNode[];
+}
+
+export type ClipNode = ClipLayer | ClipFolder;
+
 export interface ClipBitmap {
   rgba: Uint8ClampedArray;
   width: number;
@@ -37,7 +52,9 @@ export interface ClipFile {
   width: number;
   height: number;
   dpi: number;
-  /** 下 → 上 */
+  /** レイヤーツリー (各リストは下 → 上) */
+  tree: ClipNode[];
+  /** 全ラスターレイヤー (下 → 上) */
   layers: ClipLayer[];
   /** キャンバス全体のプレビュー PNG */
   preview: Uint8Array | null;
@@ -172,8 +189,9 @@ function readDatabase(db: Database, exta: Map<string, Uint8Array>): ClipFile {
     }
   };
 
-  const walk = (parentId: number, path: string, hidden: boolean, opacity: number, depth: number, masks: MaskSpec[]) => {
-    if (depth > 64) return;
+  const walk = (parentId: number, path: string, depth: number, masks: MaskSpec[]): ClipNode[] => {
+    const out: ClipNode[] = [];
+    if (depth > 64) return out;
     let id = num(layerRows.get(parentId)?.LayerFirstChildIndex);
     const seen = new Set<number>();
     while (id && !seen.has(id)) {
@@ -185,7 +203,17 @@ function readDatabase(db: Database, exta: Map<string, Uint8Array>): ClipFile {
       const op = num(l.LayerOpacity, 256) / 256;
       if (num(l.LayerFolder) !== 0) {
         const fm = maskOf(l);
-        walk(id, `${path}${name}/`, hidden || !visible, opacity * op, depth + 1, fm ? [...masks, fm] : masks);
+        const composite = num(l.LayerComposite);
+        out.push({
+          kind: "folder",
+          name,
+          visible,
+          opacity: op,
+          blend: composite === 30 ? "pass-through" : (CLIP_BLEND[composite] ?? "normal"),
+          clip: num(l.LayerClip) !== 0,
+          open: (num(l.LayerFolder) & 16) === 0,
+          children: walk(id, `${path}${name}/`, depth + 1, fm ? [...masks, fm] : masks),
+        });
       } else if (l.FilterLayerInfo != null || (l.TextLayerType != null && num(l.LayerRenderMipmap) === 0)) {
         skipped.push(name);
       } else {
@@ -230,11 +258,12 @@ function readDatabase(db: Database, exta: Map<string, Uint8Array>): ClipFile {
         const lock = num(l.LayerLock);
         const layerType = num(l.LayerType);
         if ((renderId && offscreens.has(infos.get(mipmaps.get(renderId) ?? -1) ?? -1)) || fill) {
-          layers.push({
+          const layer: ClipLayer = {
+            kind: "layer",
             name,
             path,
-            visible: visible && !hidden,
-            opacity: op * opacity,
+            visible,
+            opacity: op,
             blend: CLIP_BLEND[num(l.LayerComposite)] ?? "normal",
             clip: num(l.LayerClip) !== 0,
             lockAlpha: (lock & 16) !== 0,
@@ -250,14 +279,17 @@ function readDatabase(db: Database, exta: Map<string, Uint8Array>): ClipFile {
                 return null;
               }
             },
-          });
+          };
+          layers.push(layer);
+          out.push(layer);
         } else if (layerType !== 0) {
           skipped.push(name);
         }
       }
       id = num(l.LayerNextIndex);
     }
+    return out;
   };
-  walk(num(canvas.CanvasRootFolder), "", false, 1, 0, []);
-  return { width, height, dpi: num(canvas.CanvasResolution, 350), layers, preview, skipped };
+  const tree = walk(num(canvas.CanvasRootFolder), "", 0, []);
+  return { width, height, dpi: num(canvas.CanvasResolution, 350), tree, layers, preview, skipped };
 }

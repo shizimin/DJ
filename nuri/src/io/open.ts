@@ -1,11 +1,11 @@
 // ファイルを開く / 取り込む (PSD・CLIP・画像・.sut ブラシ・素材 .layer)。
 
 import type { Brush } from "../core/brush";
-import { createCanvas, ctx2d, Doc, type Layer } from "../core/doc";
+import { createCanvas, ctx2d, Doc, Group } from "../core/doc";
 import { toast, type Editor } from "../core/editor";
 import { addLayerCommand } from "../core/history";
 import { decodeC2F, isC2F } from "./c2f";
-import { isClip, parseClip, type ClipFile } from "./clip";
+import { isClip, parseClip, type ClipFile, type ClipNode } from "./clip";
 import { newId, putAsset, type Asset } from "./library";
 import { readPsdFile } from "./psd";
 import { parseSut } from "./sut";
@@ -75,25 +75,36 @@ export async function clipToDoc(bytes: Uint8Array, name: string): Promise<Doc> {
 
 function buildDoc(clip: ClipFile): Doc {
   const doc = new Doc(clip.width, clip.height);
-  for (const cl of clip.layers) {
-    const bmp = cl.load();
-    if (!bmp) continue;
-    const layer: Layer = doc.newLayer(`${cl.path}${cl.name}`);
-    layer.ctx.putImageData(new ImageData(bmp.rgba as Uint8ClampedArray<ArrayBuffer>, bmp.width, bmp.height), bmp.x, bmp.y);
-    Object.assign(layer, {
-      visible: cl.visible,
-      opacity: cl.opacity,
-      blend: cl.blend,
-      clip: cl.clip,
-      lockAlpha: cl.lockAlpha,
-      locked: cl.locked,
-      paper: cl.paper,
-    });
-    doc.layers.push(layer);
-  }
+  const build = (nodes: ClipNode[], into: Group) => {
+    for (const cn of nodes) {
+      if (cn.kind === "folder") {
+        const g = new Group(cn.name);
+        Object.assign(g, { visible: cn.visible, opacity: cn.opacity, blend: cn.blend, clip: cn.clip, open: cn.open });
+        build(cn.children, g);
+        if (g.children.length) into.children.push(g);
+        continue;
+      }
+      // 1 枚ずつ解読してすぐキャンバスに移す (メモリ節約)
+      const bmp = cn.load();
+      if (!bmp) continue;
+      const layer = doc.newLayer(cn.name);
+      layer.ctx.putImageData(new ImageData(bmp.rgba as Uint8ClampedArray<ArrayBuffer>, bmp.width, bmp.height), bmp.x, bmp.y);
+      Object.assign(layer, {
+        visible: cn.visible,
+        opacity: cn.opacity,
+        blend: cn.blend,
+        clip: cn.clip,
+        lockAlpha: cn.lockAlpha,
+        locked: cn.locked,
+        paper: cn.paper,
+      });
+      into.children.push(layer);
+    }
+    // クリッピングの土台がない一番下のレイヤーは解除
+    if (into.children[0]?.clip) into.children[0].clip = false;
+  };
+  build(clip.tree, doc.root);
   if (!doc.layers.length) throw new Error("読み込めるレイヤーがありませんでした");
-  // クリッピングの土台がない一番下のレイヤーは解除
-  if (doc.layers[0].clip) doc.layers[0].clip = false;
   doc.activeId = doc.layers[doc.layers.length - 1].id;
   return doc;
 }

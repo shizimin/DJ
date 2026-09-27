@@ -33,6 +33,10 @@ export interface Brush {
   rotate?: boolean;
   /** ばらつき (サイズに対する比) */
   scatter?: number;
+  /** 入り (描き始めを細くする長さ px) */
+  taperIn?: number;
+  /** 抜き (描き終わりを細くする長さ px) */
+  taperOut?: number;
   tip?: BrushTip;
   /** 読み込み元 (sut ファイル名など) */
   source?: string;
@@ -61,6 +65,7 @@ export function defaultBrushes(): Brush[] {
   return [
     { ...base, id: "pen", name: "G ペン", size: 6, hardness: 1, pressureSize: true, minSize: 0.05 },
     { ...base, id: "maru", name: "丸ペン", size: 3, hardness: 1, pressureSize: true, minSize: 0.3 },
+    { ...base, id: "inking", name: "入り抜きペン", size: 8, hardness: 1, pressureSize: true, minSize: 0.2, stabilizer: 6, taperIn: 40, taperOut: 80 },
     { ...base, id: "pencil", name: "鉛筆", size: 8, hardness: 0.8, flow: 0.55, spacing: 0.12, pressureSize: true, pressureOpacity: true, minSize: 0.5, stabilizer: 1, tip: noiseTip() },
     { ...base, id: "brush", name: "不透明水彩", size: 30, hardness: 0.75, flow: 0.35, spacing: 0.06, pressureSize: true, pressureOpacity: true, minSize: 0.4, stabilizer: 2 },
     { ...base, id: "air", name: "エアブラシ", size: 120, hardness: 0, flow: 0.08, spacing: 0.08, pressureSize: false, pressureOpacity: true, minSize: 1, stabilizer: 0 },
@@ -117,13 +122,34 @@ export interface StrokePoint {
   pressure: number;
 }
 
+export interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+const smoothstep = (t: number) => t * t * (3 - 2 * t);
+const emptyBounds = () => ({ x1: Infinity, y1: Infinity, x2: -Infinity, y2: -Infinity });
+
+/**
+ * 1 ストローク分の描画。
+ * 入力点の間は 2 次ベジェ (隣り合う点の中点を通る) で滑らかにつなぎ、一定間隔でスタンプを置く。
+ * 抜きはストロークの全長が分かる finish() の時点で、全体を描き直して適用する。
+ */
 export class Stroke {
   readonly buffer: HTMLCanvasElement;
   private g: CanvasRenderingContext2D;
   private stamp: HTMLCanvasElement | null;
-  private last: StrokePoint | null = null;
+  private pts: StrokePoint[] = [];
+  /** 描画済みの経路長 */
+  private dist = 0;
+  /** 次のスタンプまでの距離の持ち越し */
   private residual = 0;
-  bounds = { x1: Infinity, y1: Infinity, x2: -Infinity, y2: -Infinity };
+  /** 抜きの計算に使う全長 (描き直し時のみ 0 以外) */
+  private total = 0;
+  bounds = emptyBounds();
+  private pending = emptyBounds();
 
   constructor(
     public brush: Brush,
@@ -141,9 +167,25 @@ export class Stroke {
     this.g.fillStyle = color;
   }
 
+  /** 入り抜きによるサイズの倍率 */
+  private taper(): number {
+    const b = this.brush;
+    let f = 1;
+    if (b.taperIn && b.taperIn > 0) {
+      const len = this.total ? Math.min(b.taperIn, this.total * 0.45) : b.taperIn;
+      f *= 0.08 + 0.92 * smoothstep(Math.min(1, this.dist / len));
+    }
+    if (this.total && b.taperOut && b.taperOut > 0) {
+      const len = Math.min(b.taperOut, this.total * 0.45);
+      f *= 0.05 + 0.95 * smoothstep(Math.min(1, Math.max(0, this.total - this.dist) / len));
+    }
+    return f;
+  }
+
   private sizeAt(p: number) {
     const b = this.brush;
-    return b.pressureSize ? b.size * (b.minSize + (1 - b.minSize) * p) : b.size;
+    const base = b.pressureSize ? b.size * (b.minSize + (1 - b.minSize) * p) : b.size;
+    return base * this.taper();
   }
 
   private alphaAt(p: number) {
@@ -151,15 +193,30 @@ export class Stroke {
     return b.flow * (b.pressureOpacity ? 0.1 + 0.9 * p : 1);
   }
 
+  private grow(x: number, y: number, r: number) {
+    for (const bd of [this.bounds, this.pending]) {
+      bd.x1 = Math.min(bd.x1, x - r);
+      bd.y1 = Math.min(bd.y1, y - r);
+      bd.x2 = Math.max(bd.x2, x + r);
+      bd.y2 = Math.max(bd.y2, y + r);
+    }
+  }
+
   private dab(x: number, y: number, pressure: number, angle: number) {
-    const size = Math.max(0.5, this.sizeAt(pressure));
+    let size = this.sizeAt(pressure);
+    let alpha = this.alphaAt(pressure);
+    if (size < 1) {
+      // 1px 未満は薄くして細さを表現する
+      alpha *= Math.max(0.05, size);
+      size = 1;
+    }
     const g = this.g;
     const b = this.brush;
     if (b.scatter) {
       x += (Math.random() - 0.5) * size * b.scatter;
       y += (Math.random() - 0.5) * size * b.scatter;
     }
-    g.globalAlpha = this.alphaAt(pressure);
+    g.globalAlpha = alpha;
     if (!this.stamp) {
       g.beginPath();
       g.arc(x, y, size / 2, 0, Math.PI * 2);
@@ -173,67 +230,134 @@ export class Stroke {
     } else {
       g.drawImage(this.stamp, x - size / 2, y - size / 2, size, size);
     }
-    const r = size / 2 + (b.scatter ? size * b.scatter : 0) + 2;
-    const bd = this.bounds;
-    bd.x1 = Math.min(bd.x1, x - r);
-    bd.y1 = Math.min(bd.y1, y - r);
-    bd.x2 = Math.max(bd.x2, x + r);
-    bd.y2 = Math.max(bd.y2, y + r);
+    this.grow(x, y, size / 2 + (b.scatter ? size * b.scatter : 0) + 2);
   }
 
-  /** 点を追加し、前の点との間をスタンプで埋める */
-  add(pt: StrokePoint) {
-    if (!this.last) {
-      this.last = pt;
-      this.dab(pt.x, pt.y, pt.pressure, 0);
-      return;
-    }
-    const a = this.last;
-    const dx = pt.x - a.x;
-    const dy = pt.y - a.y;
-    const dist = Math.hypot(dx, dy);
-    if (dist < 1e-3) return;
+  /** 直線 a→b をスタンプで埋める (経路長 dist を進めながら) */
+  private segment(a: StrokePoint, b: StrokePoint) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-4) return;
+    const start = this.dist;
     const angle = Math.atan2(dy, dx);
     let t = this.residual;
-    while (t <= dist) {
-      const f = t / dist;
-      const p = a.pressure + (pt.pressure - a.pressure) * f;
+    while (t <= len) {
+      const f = t / len;
+      const p = a.pressure + (b.pressure - a.pressure) * f;
+      this.dist = start + t;
       this.dab(a.x + dx * f, a.y + dy * f, p, angle);
       t += Math.max(0.5, this.sizeAt(p) * this.brush.spacing);
     }
-    this.residual = t - dist;
-    this.last = pt;
+    this.residual = t - len;
+    this.dist = start + len;
   }
 
-  get dirty() {
+  /** 2 次ベジェを細かい直線に分けて描く */
+  private quad(a: StrokePoint, c: StrokePoint, b: StrokePoint) {
+    const approx = Math.hypot(c.x - a.x, c.y - a.y) + Math.hypot(b.x - c.x, b.y - c.y);
+    const n = Math.max(1, Math.ceil(approx / 2));
+    let prev = a;
+    for (let i = 1; i <= n; i++) {
+      const t = i / n;
+      const u = 1 - t;
+      const pt = {
+        x: u * u * a.x + 2 * u * t * c.x + t * t * b.x,
+        y: u * u * a.y + 2 * u * t * c.y + t * t * b.y,
+        pressure: a.pressure + (b.pressure - a.pressure) * t,
+      };
+      this.segment(prev, pt);
+      prev = pt;
+    }
+  }
+
+  private static mid(a: StrokePoint, b: StrokePoint): StrokePoint {
+    return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, pressure: (a.pressure + b.pressure) / 2 };
+  }
+
+  private feed(pt: StrokePoint) {
+    const pts = this.pts;
+    pts.push(pt);
+    const n = pts.length;
+    if (n === 1) this.dab(pt.x, pt.y, pt.pressure, 0);
+    else if (n === 2) this.segment(pts[0], Stroke.mid(pts[0], pts[1]));
+    else this.quad(Stroke.mid(pts[n - 3], pts[n - 2]), pts[n - 2], Stroke.mid(pts[n - 2], pts[n - 1]));
+  }
+
+  private closeTail() {
+    const n = this.pts.length;
+    if (n >= 2) this.segment(Stroke.mid(this.pts[n - 2], this.pts[n - 1]), this.pts[n - 1]);
+  }
+
+  /** 点を追加する (筆圧のブレは少しならす) */
+  add(pt: StrokePoint) {
+    const last = this.pts[this.pts.length - 1];
+    if (last && Math.hypot(pt.x - last.x, pt.y - last.y) < 0.3) return;
+    const p = last ? last.pressure + (pt.pressure - last.pressure) * 0.6 : pt.pressure;
+    this.feed({ x: pt.x, y: pt.y, pressure: p });
+  }
+
+  /** 最後の点まで描き切る。抜きがあるブラシは全長が分かったので全体を描き直す */
+  finish() {
+    this.closeTail();
+    if (!this.brush.taperOut || this.brush.taperOut <= 0 || this.dist <= 1) return;
+    const total = this.dist;
+    const r = this.dirty;
+    if (r) this.g.clearRect(r.x, r.y, r.w, r.h);
+    const input = this.pts;
+    this.pts = [];
+    this.dist = 0;
+    this.residual = 0;
+    this.total = total;
+    for (const p of input) this.feed(p);
+    this.closeTail();
+  }
+
+  get dirty(): Rect | null {
     const b = this.bounds;
     if (b.x2 < b.x1) return null;
+    return { x: b.x1, y: b.y1, w: b.x2 - b.x1, h: b.y2 - b.y1 };
+  }
+
+  /** 前回呼んでから描いた範囲 (画面の部分更新用) */
+  takeDirty(): Rect | null {
+    const b = this.pending;
+    if (b.x2 < b.x1) return null;
+    this.pending = emptyBounds();
     return { x: b.x1, y: b.y1, w: b.x2 - b.x1, h: b.y2 - b.y1 };
   }
 }
 
 /**
  * レイヤー画像にストロークを合成する。
- * erase: 消しゴム / lockAlpha: 透明ピクセル保護 / selection: 選択範囲マスク
+ * erase: 消しゴム / lockAlpha: 透明ピクセル保護 / selection: 選択範囲マスク / rect: この範囲だけ処理
  */
 export function applyStroke(
   target: CanvasRenderingContext2D,
   stroke: HTMLCanvasElement,
-  opts: { opacity: number; erase: boolean; lockAlpha: boolean; selection: HTMLCanvasElement | null; scratch: HTMLCanvasElement },
+  opts: { opacity: number; erase: boolean; lockAlpha: boolean; selection: HTMLCanvasElement | null; scratch: HTMLCanvasElement; rect?: Rect | null },
 ) {
+  const clip = (g: CanvasRenderingContext2D) => {
+    if (!opts.rect) return;
+    g.beginPath();
+    g.rect(opts.rect.x, opts.rect.y, opts.rect.w, opts.rect.h);
+    g.clip();
+  };
   let src: HTMLCanvasElement = stroke;
   if (opts.selection) {
     const s = ctx2d(opts.scratch);
+    s.save();
+    clip(s);
     s.globalAlpha = 1;
-    s.globalCompositeOperation = "source-over";
-    s.clearRect(0, 0, opts.scratch.width, opts.scratch.height);
+    s.globalCompositeOperation = "copy";
     s.drawImage(stroke, 0, 0);
     s.globalCompositeOperation = "destination-in";
     s.drawImage(opts.selection, 0, 0);
-    s.globalCompositeOperation = "source-over";
+    s.restore();
     src = opts.scratch;
   }
   target.save();
+  clip(target);
   target.globalAlpha = opts.opacity;
   target.globalCompositeOperation = opts.erase ? "destination-out" : opts.lockAlpha ? "source-atop" : "source-over";
   target.drawImage(src, 0, 0);

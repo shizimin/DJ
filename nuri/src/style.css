@@ -112,8 +112,7 @@ canvas.stage[data-tool=brush], canvas.stage[data-tool=eraser] { cursor: none; }
 .layer { display: flex; align-items: center; gap: 6px; padding: 4px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
 .layer:hover { background: var(--panel-2); }
 .layer.active { background: color-mix(in srgb, var(--accent) 30%, transparent); border-color: var(--accent); }
-.layer.clipped { margin-left: 14px; border-left: 3px solid var(--accent-2); }
-.layer.drop { border-top: 2px solid var(--accent-2); }
+.layer.clipped { border-left: 3px solid var(--accent-2); }
 .layer .eye { border: none; background: none; padding: 0 2px; width: 20px; }
 .layer .eye.off { color: var(--muted); }
 .layer canvas.thumb { width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 3px; flex: none; background: #fff; }
@@ -161,3 +160,13 @@ body.dropping .stage-wrap::after { content: "ここにドロップ (PSD / CLIP /
   aside.left { width: 160px; }
   aside.right { width: 240px; }
 }
+
+/* レイヤーフォルダ */
+.layer.folder { background: color-mix(in srgb, var(--panel-2) 60%, transparent); }
+.layer.folder.active { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+.layer .folder-toggle { border: none; background: none; padding: 0 2px; width: 40px; font-size: 14px; flex: none; }
+.layer.hidden-layer .meta, .layer.hidden-layer canvas.thumb { opacity: .45; }
+.layer[data-drop="above"] { box-shadow: inset 0 2px 0 var(--accent-2); }
+.layer[data-drop="below"] { box-shadow: inset 0 -2px 0 var(--accent-2); }
+.layer[data-drop="into"] { outline: 2px dashed var(--accent-2); outline-offset: -2px; }
+.panel h3.section { margin-top: 12px; }

@@ -40,6 +40,22 @@ function brushSettings(editor: Editor, brush: Brush, onChange: () => void) {
     slider({ label: "手ブレ補正", min: 0, max: 20, value: brush.stabilizer, onInput: (v) => set("stabilizer", v) }),
     h("div", { class: "checks" }, check("筆圧でサイズ", "pressureSize"), check("筆圧で濃さ", "pressureOpacity"), brush.tip ? check("進行方向に回転", "rotate") : null),
     slider({ label: "最小サイズ", min: 0, max: 1, step: 0.01, value: brush.minSize, format: pct, onInput: (v) => set("minSize", v) }),
+    slider({ label: "入り", min: 0, max: 300, value: brush.taperIn ?? 0, format: (v) => (v ? `${v}px` : "なし"), onInput: (v) => set("taperIn", v) }),
+    slider({ label: "抜き", min: 0, max: 300, value: brush.taperOut ?? 0, format: (v) => (v ? `${v}px` : "なし"), onInput: (v) => set("taperOut", v) }),
+    h("h3", { class: "section" }, "筆圧 (全ブラシ共通)"),
+    slider({
+      label: "筆圧の硬さ",
+      min: 0.4,
+      max: 2.5,
+      step: 0.05,
+      value: editor.pressureCurve,
+      format: (v) => (v < 0.95 ? "やわらかい" : v > 1.05 ? "かたい" : "標準"),
+      onInput: (v) => {
+        editor.pressureCurve = v;
+        onChange();
+      },
+    }),
+    h("p", { class: "hint" }, "やわらかい: 軽い筆圧でも太く濃く / かたい: しっかり押したときだけ太く"),
   );
 }
 

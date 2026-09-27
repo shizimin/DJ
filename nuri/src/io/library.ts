@@ -72,7 +72,7 @@ function canvasFromDataUrl(url: string): Promise<HTMLCanvasElement> {
 }
 
 const PREFS_KEY = "nuri.brush.prefs";
-const BRUSH_FIELDS = ["size", "opacity", "flow", "hardness", "spacing", "pressureSize", "pressureOpacity", "minSize", "stabilizer", "rotate"] as const;
+const BRUSH_FIELDS = ["size", "opacity", "flow", "hardness", "spacing", "pressureSize", "pressureOpacity", "minSize", "stabilizer", "rotate", "taperIn", "taperOut"] as const;
 
 /** 組み込みブラシの設定は localStorage、読み込んだブラシ (.sut) は IndexedDB に保存 */
 export async function saveBrushPrefs(editor: Editor) {
@@ -82,7 +82,7 @@ export async function saveBrushPrefs(editor: Editor) {
     prefs[b.id] = Object.fromEntries(BRUSH_FIELDS.map((k) => [k, b[k]]));
   }
   try {
-    localStorage.setItem(PREFS_KEY, JSON.stringify({ prefs, brushIndex: editor.brushIndex, eraserIndex: editor.eraserIndex, color: editor.color, recent: editor.recentColors }));
+    localStorage.setItem(PREFS_KEY, JSON.stringify({ prefs, brushIndex: editor.brushIndex, eraserIndex: editor.eraserIndex, color: editor.color, recent: editor.recentColors, pressureCurve: editor.pressureCurve }));
   } catch {
     /* 保存できない環境 */
   }
@@ -106,7 +106,8 @@ export async function loadBrushPrefs(editor: Editor) {
   try {
     const raw = localStorage.getItem(PREFS_KEY);
     if (raw) {
-      const { prefs, brushIndex, eraserIndex, color, recent } = JSON.parse(raw);
+      const { prefs, brushIndex, eraserIndex, color, recent, pressureCurve } = JSON.parse(raw);
+      if (typeof pressureCurve === "number") editor.pressureCurve = pressureCurve;
       for (const b of [...editor.brushes, ...editor.erasers]) if (prefs?.[b.id]) Object.assign(b, prefs[b.id]);
       if (typeof color === "string") editor.color = color;
       if (Array.isArray(recent)) editor.recentColors = recent;

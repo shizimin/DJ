@@ -1,6 +1,6 @@
 // 取り消し / やり直し。
 
-import { createCanvas, ctx2d, type Doc, type Layer } from "./doc";
+import { createCanvas, ctx2d, type Doc, type Group, type Layer, type Node } from "./doc";
 
 export interface Command {
   label: string;
@@ -98,50 +98,53 @@ export class PixelSnapshot {
   }
 }
 
-/** レイヤー追加を記録するコマンド */
-export function addLayerCommand(doc: Doc, layer: Layer, index?: number): Command {
-  let at = index;
+/** レイヤー (フォルダ) 追加を記録するコマンド。parent 省略時はアクティブの上 */
+export function addLayerCommand(doc: Doc, node: Node, index?: number, parent?: Group): Command {
+  let slot: { parent: Group; index: number } | null = parent ? { parent, index: index ?? parent.children.length } : index !== undefined ? { parent: doc.root, index } : null;
   return {
-    label: "レイヤー追加",
+    label: node.kind === "group" ? "フォルダ追加" : "レイヤー追加",
     redo() {
-      doc.insert(layer, at);
-      at = doc.indexOf(layer);
+      slot ??= doc.defaultSlot();
+      doc.insert(node, slot.index, slot.parent);
     },
     undo() {
-      doc.remove(layer);
+      doc.remove(node);
     },
   };
 }
 
-export function removeLayerCommand(doc: Doc, layer: Layer): Command {
-  const at = doc.indexOf(layer);
+export function removeLayerCommand(doc: Doc, node: Node): Command {
+  const parent = doc.parentOf(node) ?? doc.root;
+  const at = parent.children.indexOf(node);
   return {
     label: "レイヤー削除",
-    redo: () => doc.remove(layer),
-    undo: () => doc.insert(layer, at),
+    redo: () => doc.remove(node),
+    undo: () => doc.insert(node, at, parent),
   };
 }
 
-export function moveLayerCommand(doc: Doc, layer: Layer, to: number): Command {
-  const from = doc.indexOf(layer);
+export function moveLayerCommand(doc: Doc, node: Node, to: number, toParent?: Group): Command {
+  const fromParent = doc.parentOf(node) ?? doc.root;
+  const from = fromParent.children.indexOf(node);
+  const target = toParent ?? fromParent;
   return {
     label: "レイヤー移動",
-    redo: () => doc.move(layer, to),
-    undo: () => doc.move(layer, from),
+    redo: () => doc.move(node, to, target),
+    undo: () => doc.move(node, from, fromParent),
   };
 }
 
-/** レイヤープロパティ変更 (不透明度・合成モード等) */
-export function propCommand<K extends keyof Layer>(doc: Doc, layer: Layer, key: K, value: Layer[K], before?: Layer[K]): Command {
-  const old = before === undefined ? layer[key] : before;
+/** レイヤー / フォルダのプロパティ変更 (不透明度・合成モード等) */
+export function propCommand<T extends Node, K extends keyof T>(doc: Doc, node: T, key: K, value: T[K], before?: T[K]): Command {
+  const old = before === undefined ? node[key] : before;
   return {
     label: "レイヤー設定",
     redo() {
-      layer[key] = value;
+      node[key] = value;
       doc.emit("layers");
     },
     undo() {
-      layer[key] = old;
+      node[key] = old;
       doc.emit("layers");
     },
   };

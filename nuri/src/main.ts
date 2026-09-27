@@ -201,6 +201,7 @@ window.addEventListener("keydown", (e) => {
       d: () => editor.deselect(),
       i: () => e.shiftKey && editor.invertSelection(),
       e: () => (e.shiftKey ? void exportPng() : layers.actions.mergeDown()),
+      g: () => layers.actions.group(),
       "0": () => editor.fitView(),
       "1": () => editor.setZoom(1),
       "=": () => editor.setZoom(editor.view.zoom * 1.25),
@@ -262,4 +263,4 @@ window.addEventListener("beforeunload", (e) => {
 });
 
 // デバッグ・自動テスト用
-Object.assign(window, { nuri: { editor, jobs, settings, openFiles: handleFiles, psd: { readPsdFile, writePsdFile } } });
+Object.assign(window, { nuri: { editor, jobs, settings, openFiles: handleFiles, psd: { readPsdFile, writePsdFile }, createDocument } });

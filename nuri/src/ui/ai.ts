@@ -144,7 +144,8 @@ export function aiPanel(editor: Editor, settings: AiSettings, jobs: AiJobs) {
       await new Promise((r) => setTimeout(r, 30));
       const layer = localLineArt(d, src, local, lineColor.value);
       if (!layer) return void toast("レイヤーが空です", "error");
-      editor.history.run(addLayerCommand(d, layer, d.indexOf(src) + 1));
+      const parent = d.parentOf(src) ?? d.root;
+      editor.history.run(addLayerCommand(d, layer, parent.children.indexOf(src) + 1, parent));
       fade();
       toast("線画レイヤーを追加しました", "ok");
       return;
