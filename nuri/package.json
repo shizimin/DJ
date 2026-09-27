@@ -1,0 +1,29 @@
+{
+  "name": "nuri",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "AI 機能付きの軽量ペイントアプリ (Mac 向け)",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "start": "vite preview --port 5178 --open",
+    "e2e": "node scripts/e2e.mjs"
+  },
+  "dependencies": {
+    "ag-psd": "^31.0.2",
+    "pako": "^3.0.2",
+    "sql.js": "^1.14.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "@types/sql.js": "^1.4.11",
+    "playwright": "^1.63.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1",
+    "vitest": "^5.0.2"
+  }
+}
